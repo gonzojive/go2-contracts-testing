@@ -25,16 +25,18 @@ func TestReadFile(t *testing.T) {
 		want string
 	}{
 		{
-			"string-based form",
+			"string-based",
 			StringForm(`fancy "string" with quotes`),
 			"\"fancy \\\"string\\\" with quotes\"",
 		},
 		{
-			"int-based form",
+			"int-based",
 			BasicForm(42),
 			"42",
 		},
-		{"int-based form", BasicForm(int8(42)), "int8:42"},
+		{"int-based", BasicForm(int8(42)), "int8:42"},
+		{"complex128", BasicForm(2 - 4i), "(complex128 2.000000 -4.000000)"},
+		{"complex128", BasicForm(complex64(2 - 4i)), "(complex64 2.000000 -4.000000)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -153,8 +155,10 @@ func (a *basicFormAdapter(T)) Format(e T, fc *FormatContext) error {
 	case reflect.Float32: fc.Print(fmt.Sprintf("float32:%v", e))
 	case reflect.Float64: fc.Print(fmt.Sprintf("float64:%v", e))
 	case reflect.Complex64: fc.Print(fmt.Sprintf("(complex64 %f %f)", real(rv.Complex()), imag(rv.Complex())))
-	case reflect.Complex128: fc.Print(fmt.Sprintf("(complex128 %f %f)", real(rv.Complex()), imag(rv.Complex())))
-	case reflect.String: fc.Print(fmt.Sprintf("%q", e))
+	case reflect.Complex128:
+		 fc.Print(fmt.Sprintf("(complex128 %f %f)", real(rv.Complex()), imag(rv.Complex())))
+	case reflect.String:
+		fc.Print(fmt.Sprintf("%q", rv.String()))
 	}
 	return nil
 }
