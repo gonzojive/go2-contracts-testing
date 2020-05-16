@@ -304,7 +304,7 @@ func (fp filePosition) lineCol(fs *FileSource) string {
 	return fmt.Sprintf("%d:%d", nextLineOffset, uint(fp.col))
 }
 
-type Form struct {
+type Form(type V) struct {
 	// Only one of the fields below is populated.
 	stringLiteral *String
 	list          *List
@@ -501,11 +501,11 @@ func (f *Symbol) Equals(other *Symbol) bool {
 	return fp == op
 }
 
-type List struct {
-	forms []*Form
+type List(type ElemType) struct {
+	forms []*Form(ElemType)
 }
 
-func NewList(forms ...*Form) *List {
+func NewList(type ElemType)(forms ...*Form) *List {
 	for i, f := range forms {
 		if f == nil {
 			panic(fmt.Errorf("invalid list %v; nil form not allowed for element[%d]", forms, i))

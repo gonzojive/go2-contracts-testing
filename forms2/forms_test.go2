@@ -1,0 +1,210 @@
+// Package forms is a library for reading s-expressions. Lists, strings,
+// comments, numbers, and symbols are supported.
+package forms
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+////////////////////////////////////////////////////////////////////////////////
+// Tests
+////////////////////////////////////////////////////////////////////////////////
+
+func TestReadFile(t *testing.T) {
+
+	type genericForm interface {
+		code() string
+	}
+
+	tests := []struct {
+		name            string
+		f genericForm
+		want string
+	}{
+		{
+			"string-based form",
+			StringForm(`fancy "string" with quotes`),
+			"\"fancy \\\"string\\\" with quotes\"",
+		},
+		{
+			"int-based form",
+			BasicForm(42),
+			"42",
+		},
+		{"int-based form", BasicForm(int8(42)), "int8:42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// var gotFormStrings []string
+			// receiver := func(form *Form) Indicator {
+			//	gotFormStrings = append(gotFormStrings, form.code(tt.fmtCtx))
+			//	return Continue
+			// }
+			// if err := ReadFile(tt.src, receiver); (err != nil) != tt.wantErr {
+			//	t.Errorf("ReadFile() error = %v, wantErr %v", err, tt.wantErr)
+			// }
+			if got, want := tt.f.code(), tt.want; got != want {
+				t.Errorf("ReadFile() got diff in expected forms:\ngot  %v,\nwant %v", got, want)
+			}
+		})
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Implementation
+////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+type Form(type ElemType) struct {
+	elem ElemType
+	adapter FormAdapter(ElemType)
+	// TODO(reddaly): Make start and end optional.
+	// start, end filePosition
+	// fileSrc    *FileSource
+}
+
+func (f *Form(ElemType)) code() string {
+	fc := &FormatContext{maxLineLength: 80}
+	if err := f.adapter.Format(f.elem, fc); err != nil {
+		return fmt.Sprintf("!!!error printing code: %v", err)
+	}
+	return fc.s.String()
+}
+
+type FormatContext struct {
+	maxLineLength int
+	s strings.Builder
+}
+
+func (fc *FormatContext) Print(s string) {
+	fc.s.WriteString(s)
+}
+
+type FormAdapter(type ElemType) interface {
+	Format(e ElemType, fc *FormatContext) error
+}
+
+type FormFormatter(type ElemType) func(e ElemType, fc *FormatContext)
+
+func newForm(type ElemType)(e ElemType, a FormAdapter(ElemType)) *Form(ElemType) {
+	return &Form(ElemType){e, a}
+}
+
+type fnBasedFormAdapter(type ElemType) struct {
+	format func(e ElemType, fc *FormatContext) error
+}
+
+func (a *fnBasedFormAdapter(ElemType)) Format(e ElemType, fc *FormatContext) error {
+	return a.format(e, fc)
+}
+
+func StringForm(s string) *Form(string) {
+	formatFn := func(s string, fc *FormatContext) error {
+		fc.Print(fmt.Sprintf("%q", s))
+		return nil
+	}
+	// It seems a bit verbose that (string) is required here, not fnBasedFormAdapter{...}.
+	var adapter FormAdapter(string) = &fnBasedFormAdapter(string){formatFn}
+	//var adapter FormAdapter(string) = &fnBasedFormAdapter{formatFn}
+	return newForm(s, adapter)
+}
+
+contract PrimitiveType(T) {
+	T bool, int, int8, int16, int32, int64, string, uint, uint8, uint16, uint32, uint64, float32, float64, complex64, complex128
+}
+
+// basicFormAdapter implements FormAdapter() for the primitive types.
+type basicFormAdapter(type T PrimitiveType) struct{}
+
+
+func (a *basicFormAdapter(T)) Format(e T, fc *FormatContext) error {
+	//This doesn't work: fc.Print(string(e)) -- cannot convert e (variable of type T) to string
+	// This also doesn't work: cannot type switch on non-interface value e (type int)
+	// switch ee := e.(type) {
+	// case int: fc.Print(string(ee))
+	// default: fc.Print(fmt.Sprintf("!!! unsupported type %v", e))
+	// }
+	// IMO, the proposal to allow switching on T is most natural:
+	// switch T.(type) {
+	//	case int: fc.Print(string(e))
+	//	default: fc.Print(fmt.Sprintf("!!! unsupported type %v", e))
+	// }
+
+	// This can't be the only way, right?
+	rv := reflect.ValueOf(e)
+	switch rv.Kind() {
+	case reflect.Bool: fc.Print(fmt.Sprintf("%v", e))
+	case reflect.Int:fc.Print(fmt.Sprintf("%v", e))
+	case reflect.Int8: fc.Print(fmt.Sprintf("int8:%v", e))
+	case reflect.Int16: fc.Print(fmt.Sprintf("int16:%v", e))
+	case reflect.Int32: fc.Print(fmt.Sprintf("int32:%v", e))
+	case reflect.Int64: fc.Print(fmt.Sprintf("int64:%v", e))
+	case reflect.Uint: fc.Print(fmt.Sprintf("uint:%v", e))
+	case reflect.Uint8: fc.Print(fmt.Sprintf("uint8:%v", e))
+	case reflect.Uint16: fc.Print(fmt.Sprintf("uint16:%v", e))
+	case reflect.Uint32: fc.Print(fmt.Sprintf("uint32:%v", e))
+	case reflect.Uint64: fc.Print(fmt.Sprintf("uint64:%v", e))
+	case reflect.Uintptr: fc.Print(fmt.Sprintf("uintptr:%v", e))
+	case reflect.Float32: fc.Print(fmt.Sprintf("float32:%v", e))
+	case reflect.Float64: fc.Print(fmt.Sprintf("float64:%v", e))
+	case reflect.Complex64: fc.Print(fmt.Sprintf("(complex64 %f %f)", real(rv.Complex()), imag(rv.Complex())))
+	case reflect.Complex128: fc.Print(fmt.Sprintf("(complex128 %f %f)", real(rv.Complex()), imag(rv.Complex())))
+	case reflect.String: fc.Print(fmt.Sprintf("%q", e))
+	}
+	return nil
+}
+
+func BasicForm(type T PrimitiveType)(t T) *Form(T) {
+	// doesn't work: adapter := &basicFormAdapter(T){}
+	var adapter FormAdapter(T) = &basicFormAdapter(T){}
+	return newForm(t, adapter)
+}
+
+// func (f *Form) String() string {
+//	if f.fileSrc == nil {
+//		return fmt.Sprintf("%s", f.code(nil))
+//	}
+//	return fmt.Sprintf("%s(%s-%s) %s", f.fileSrc.name, f.start.lineCol(f.fileSrc), f.end.lineCol(f.fileSrc), f.code(nil))
+// }
+
+// func (f *Form) SExprString() string {
+//	return fmt.Sprintf("%s", f.code(nil))
+// }
+
+// func (f *Form) code(fmtCtx *formatContext) string {
+//	if c := f.stringLiteral; c != nil {
+//		return c.code(fmtCtx)
+//	}
+//	if c := f.list; c != nil {
+//		return c.code(fmtCtx)
+//	}
+//	if c := f.symbol; c != nil {
+//		return c.code(fmtCtx)
+//	}
+//	if c := f.whitespace; c != nil {
+//		return c.code(fmtCtx)
+//	}
+//	if c := f.comment; c != nil {
+//		return c.code(fmtCtx)
+//	}
+//	if c := f.intForm; c != nil {
+//		return c.code(fmtCtx)
+//	}
+//	if c := f.float64Form; c != nil {
+//		return c.code(fmtCtx)
+//	}
+//	panic("invalid form")
+// }
+
+// type formatContext struct {
+//	verboseQuoteForm bool
+// }
+
+// func (fmtCtx *formatContext) useVerboseQuoteForm() bool {
+//	return fmtCtx != nil && fmtCtx.verboseQuoteForm
+// }
