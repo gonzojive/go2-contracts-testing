@@ -1,0 +1,1011 @@
+// Package forms is a library for reading s-expressions. Lists, strings,
+// comments, numbers, and symbols are supported.
+package forms
+
+import (
+	"bytes"
+	"fmt"
+	"io"
+	"reflect"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+////////////////////////////////////////////////////////////////////////////////
+// Tests
+////////////////////////////////////////////////////////////////////////////////
+
+func TestReadFile(t *testing.T) {
+	tests := []struct {
+		name            string
+		src             *FileSource
+		fmtCtx          *formatContext
+		wantFormStrings []string
+		wantErr         bool
+	}{
+		{
+			"hello-world",
+			StringFileSource("hello-world", "abc.gro"),
+			&formatContext{},
+			[]string{"hello-world"},
+			false,
+		},
+		{
+			"(abc 123)",
+			StringFileSource("(abc 123)", "abc.gro"),
+			&formatContext{},
+			[]string{"(abc 123)"},
+			false,
+		},
+		{
+			"  \n\n(abc 123)",
+			StringFileSource("  \n\n(abc 123)", "abc.gro"),
+			&formatContext{},
+			[]string{`ws:"  \n\n"`, "(abc 123)"},
+			false,
+		},
+		{
+			"/* hello\nworld*/ ",
+			StringFileSource("/* hello\nworld*/ ", "2.gro"),
+			&formatContext{},
+			[]string{"/* hello\nworld*/", "ws:\" \""},
+			false,
+		},
+		{
+			" // hello world",
+			StringFileSource(" // hello world", "3.gro"),
+			&formatContext{},
+			[]string{"ws:\" \"", "// hello world"},
+			false,
+		},
+		{
+			" // hello\nworld",
+			StringFileSource(" // hello\nworld", "3.gro"),
+			&formatContext{},
+			[]string{"ws:\" \"", "// hello", "world"},
+			false,
+		},
+		{
+			"1234.3",
+			StringFileSource("1234.3", "4.gro"),
+			&formatContext{},
+			[]string{"1234.300000"},
+			false,
+		},
+		{
+			`"hi there" string`,
+			StringFileSource(`"hi there"`, "4.gro"),
+			&formatContext{},
+			[]string{`"hi there"`},
+			false,
+		},
+		{
+			"string with legal line space",
+			StringFileSource("\"hi\nthere\"", "4.gro"),
+			&formatContext{},
+			[]string{`"hi\nthere"`},
+			false,
+		},
+		{
+			"'hello-world",
+			StringFileSource("'hello-world", "4.gro"),
+			&formatContext{},
+			[]string{"'hello-world"},
+			false,
+		},
+		{
+			"'hello-world(abc)",
+			StringFileSource("'hello-world(abc)", "4.gro"),
+			&formatContext{verboseQuoteForm: true},
+			[]string{"(quote hello-world)", "(abc)"},
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotFormStrings []string
+			receiver := func(form *Form) Indicator {
+				gotFormStrings = append(gotFormStrings, form.code(tt.fmtCtx))
+				return Continue
+			}
+			if err := ReadFile(tt.src, receiver); (err != nil) != tt.wantErr {
+				t.Errorf("ReadFile() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got, want := gotFormStrings, tt.wantFormStrings; !reflect.DeepEqual(got, want) {
+				t.Errorf("ReadFile() got diff in expected forms:\ngot  %v,\nwant %v", got, want)
+			}
+		})
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Implementation
+////////////////////////////////////////////////////////////////////////////////
+
+type Indicator bool
+
+const (
+	Stop     Indicator = false
+	Continue Indicator = true
+)
+
+type config struct {
+	parseSymbol func(string) (*Symbol, error)
+}
+
+func defaultConfig() *config {
+	return &config{
+		parseSymbol: func(literal string) (*Symbol, error) {
+			return GetSymbol(literal), nil
+		},
+	}
+}
+
+func ReadFile(src *FileSource, receiver func(*Form) Indicator) error {
+	err := readFile(defaultConfig(), src, receiver)
+	if err == io.EOF {
+		return nil
+	}
+	return err
+}
+
+type ReadOptions struct {
+	ReadComments, ReadWhitespace bool
+	ParseSymbol                  func(string) (*Symbol, error)
+}
+
+func ReadForm(src *FileSource, opts *ReadOptions) (*Form, error) {
+	cfg := defaultConfig()
+	if opts == nil {
+		opts = &ReadOptions{}
+	}
+	if opts.ParseSymbol != nil {
+		cfg.parseSymbol = opts.ParseSymbol
+	}
+	var finalForm *Form
+	if err := readFile(cfg, src, func(f *Form) Indicator {
+		if !opts.ReadComments && f.IsComment() {
+			return Continue
+		}
+		if !opts.ReadWhitespace && f.IsWhitespace() {
+			return Continue
+		}
+		finalForm = f
+		return Stop
+	}); err != nil {
+		return nil, err
+	}
+	return finalForm, nil
+}
+
+func readFile(cfg *config, src *FileSource, receiver func(*Form) Indicator) error {
+	f, err := consumeForm(cfg, src)
+	if err != nil {
+		return err
+	}
+	if receiver(f) == Stop {
+		return nil
+	}
+
+	for {
+		f, err = consumeForm(cfg, src)
+		if err == io.EOF {
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		if receiver(f) == Stop {
+			return nil
+		}
+	}
+}
+
+// FileName describes the name of a file.
+type FileName string
+
+type runeCount uint
+
+// FileSource is RuneReader backed by another RuneReader that keeps track of the current row
+// and column number of the cursor. It implements UnreadRune, though not very efficiently.
+type FileSource struct {
+	name                      FileName
+	cursorByteOffset          uint
+	cursorLineStartRuneOffset runeCount
+	scanner                   io.RuneScanner
+	// The byte offset of the start of each line.
+	lineStartByteOffsets []uint
+	fileSize             uint
+	readRuneEffects      []readRuneSideEffects
+}
+
+func (fs *FileSource) String() string {
+	return fmt.Sprintf("%s(%d:%d)", fs.name, len(fs.lineStartByteOffsets)+1, fs.cursorLineStartRuneOffset)
+}
+
+type readRuneSideEffects struct {
+	unapply func()
+}
+
+// StringFileSource returns a FileSource based on a string with the given FileName.
+func StringFileSource(contents string, name FileName) *FileSource {
+	return &FileSource{
+		name:    name,
+		scanner: bytes.NewBufferString(contents),
+	}
+}
+
+// ReadRune returns the next rune and the number of bytes read.
+func (fs *FileSource) ReadRune() (rune, int, error) {
+	r, size, err := fs.scanner.ReadRune()
+	if err == io.EOF {
+		fs.fileSize = fs.cursorByteOffset
+		return r, size, err
+	}
+	if err != nil {
+		return r, size, err
+	}
+	fs.cursorByteOffset += uint(size)
+	if r == '\n' {
+		// TODO(reddaly): Handle \r\n, \r style newlines.
+		fs.lineStartByteOffsets = append(fs.lineStartByteOffsets, fs.cursorByteOffset)
+		prevCursorLineStartRuneOffset := fs.cursorLineStartRuneOffset
+		fs.cursorLineStartRuneOffset = 0
+		fs.readRuneEffects = append(fs.readRuneEffects, readRuneSideEffects{
+			unapply: func() {
+				fs.cursorByteOffset -= uint(size)
+				fs.lineStartByteOffsets = fs.lineStartByteOffsets[0 : len(fs.lineStartByteOffsets)-1]
+				fs.cursorLineStartRuneOffset = prevCursorLineStartRuneOffset
+			},
+		})
+	} else {
+		fs.cursorLineStartRuneOffset++
+		fs.readRuneEffects = append(fs.readRuneEffects, readRuneSideEffects{
+			unapply: func() {
+				fs.cursorByteOffset -= uint(size)
+				fs.cursorLineStartRuneOffset--
+			},
+		})
+	}
+	return r, size, nil
+}
+
+// UnreadRune moves the cursor backwards by one.
+func (fs *FileSource) UnreadRune() error {
+	err := fs.scanner.UnreadRune()
+	if err != nil {
+		return err
+	}
+	if len(fs.readRuneEffects) == 0 {
+		return fmt.Errorf("%s: tried to UnreadRune at beginning of file", fs)
+	}
+	lastEffect := fs.readRuneEffects[len(fs.readRuneEffects)-1]
+	lastEffect.unapply()
+	fs.readRuneEffects = fs.readRuneEffects[0 : len(fs.readRuneEffects)-1]
+	return nil
+}
+
+type filePosition struct {
+	byteOffset uint
+	col        runeCount
+}
+
+func (fp filePosition) lineCol(fs *FileSource) string {
+	nextLineOffset := sort.Search(len(fs.lineStartByteOffsets), func(i int) bool {
+		return fs.lineStartByteOffsets[i] > fp.byteOffset
+	})
+
+	if nextLineOffset == 0 {
+		nextLineOffset = 1
+	}
+	return fmt.Sprintf("%d:%d", nextLineOffset, uint(fp.col))
+}
+
+type Form struct {
+	// Only one of the fields below is populated.
+	stringLiteral *String
+	list          *List
+	symbol        *Symbol
+	whitespace    *Whitespace
+	comment       *Comment
+	intForm       *Int
+	float64Form   *Float64
+
+	// TODO(reddaly): Make start and end optional.
+	start, end filePosition
+	fileSrc    *FileSource
+}
+
+func (f *Form) GetComment() *Comment       { return f.comment }
+func (f *Form) GetFloat64() *Float64       { return f.float64Form }
+func (f *Form) GetInt() *Int               { return f.intForm }
+func (f *Form) GetList() *List             { return f.list }
+func (f *Form) GetString() *String         { return f.stringLiteral }
+func (f *Form) GetSymbol() *Symbol         { return f.symbol }
+func (f *Form) GetWhitespace() *Whitespace { return f.whitespace }
+
+func (f *Form) IsAtom() bool       { return f.IsSymbol() || f.IsFloat64() || f.IsInt() || f.IsSymbol() }
+func (f *Form) IsComment() bool    { return f.comment != nil }
+func (f *Form) IsFloat64() bool    { return f.float64Form != nil }
+func (f *Form) IsInt() bool        { return f.intForm != nil }
+func (f *Form) IsList() bool       { return f.list != nil }
+func (f *Form) IsString() bool     { return f.stringLiteral != nil }
+func (f *Form) IsSymbol() bool     { return f.symbol != nil }
+func (f *Form) IsWhitespace() bool { return f.whitespace != nil }
+
+func (f *Form) String() string {
+	if f.fileSrc == nil {
+		return fmt.Sprintf("%s", f.code(nil))
+	}
+	return fmt.Sprintf("%s(%s-%s) %s", f.fileSrc.name, f.start.lineCol(f.fileSrc), f.end.lineCol(f.fileSrc), f.code(nil))
+}
+
+func (f *Form) SExprString() string {
+	return fmt.Sprintf("%s", f.code(nil))
+}
+
+func (f *Form) code(fmtCtx *formatContext) string {
+	if c := f.stringLiteral; c != nil {
+		return c.code(fmtCtx)
+	}
+	if c := f.list; c != nil {
+		return c.code(fmtCtx)
+	}
+	if c := f.symbol; c != nil {
+		return c.code(fmtCtx)
+	}
+	if c := f.whitespace; c != nil {
+		return c.code(fmtCtx)
+	}
+	if c := f.comment; c != nil {
+		return c.code(fmtCtx)
+	}
+	if c := f.intForm; c != nil {
+		return c.code(fmtCtx)
+	}
+	if c := f.float64Form; c != nil {
+		return c.code(fmtCtx)
+	}
+	panic("invalid form")
+}
+
+type formatContext struct {
+	verboseQuoteForm bool
+}
+
+func (fmtCtx *formatContext) useVerboseQuoteForm() bool {
+	return fmtCtx != nil && fmtCtx.verboseQuoteForm
+}
+
+type Comment struct {
+	contents string
+}
+
+func (f Comment) code(fmtCtx *formatContext) string {
+	return f.contents
+}
+
+type Int struct {
+	value int64
+}
+
+func (f Int) code(fmtCtx *formatContext) string {
+	return fmt.Sprintf("%d", f.value)
+}
+
+func (f Int) GoLiteral() string {
+	return fmt.Sprintf("%d", f.value)
+}
+
+func (f Int) Value() int64 {
+	return f.value
+}
+
+type Float64 struct {
+	value float64
+}
+
+func (f Float64) code(fmtCtx *formatContext) string {
+	return fmt.Sprintf("%f", f.value)
+}
+
+func (f Float64) GoLiteral() string {
+	return fmt.Sprintf("%f", f.value)
+}
+
+func (f Float64) Value() float64 {
+	return f.value
+}
+
+type String struct {
+	contents string
+}
+
+func MakeStringForm(contents string) *Form {
+	s := &String{contents}
+	return &Form{stringLiteral: s}
+}
+
+func (f *String) Value() string {
+	return f.contents
+}
+
+func (f String) code(fmtCtx *formatContext) string {
+	return strconv.Quote(f.contents)
+}
+
+// Package is a generic package type.
+type Package interface {
+	// IsReaderPackage is used to differentiate a package object from other object types.
+	IsReaderPackage()
+
+	// Path returns the import path for the package. This is a canonical name for the
+	// package; the same package has only a single Path.
+	Path() string
+}
+
+type Symbol struct {
+	name string
+	pkg  Package
+}
+
+// GetSymbol returns a symbol with the nil package.
+func GetSymbol(name string) *Symbol {
+	return FullSymbol(name, nil)
+}
+
+// QualifiedSymbol returns a symbol with the given package name.
+func QualifiedSymbol(name, packagePath string) *Symbol {
+	panic("not implemented")
+}
+
+// FullSymbol returns a symbol with a package association.
+func FullSymbol(name string, pkg Package) *Symbol {
+	return &Symbol{
+		name: name,
+		pkg:  pkg,
+	}
+}
+
+func (f Symbol) String() string {
+	return f.Name()
+}
+
+func (f Symbol) Name() string {
+	return string(f.name)
+}
+
+// Package returns the package associated with the symbol.
+func (f Symbol) Package() Package {
+	return f.pkg
+}
+
+func (f Symbol) code(fmtCtx *formatContext) string {
+	return f.String()
+}
+
+func (f *Symbol) Equals(other *Symbol) bool {
+	if f == nil && other == nil {
+		return true
+	}
+	if f == nil || other == nil {
+		return false
+	}
+	if f.Name() != other.Name() {
+		return false
+	}
+	fp, op := f.Package(), other.Package()
+	return fp == op
+}
+
+type List struct {
+	forms []*Form
+}
+
+func NewList(forms ...*Form) *List {
+	for i, f := range forms {
+		if f == nil {
+			panic(fmt.Errorf("invalid list %v; nil form not allowed for element[%d]", forms, i))
+		}
+	}
+	return &List{forms}
+}
+
+func (f List) Forms() []*Form {
+	var out []*Form
+	for _, subForm := range f.forms {
+		if subForm == nil {
+			panic("invalid list; nil form not supported")
+		}
+		if subForm.comment != nil || subForm.whitespace != nil {
+			continue
+		}
+		out = append(out, subForm)
+	}
+	return out
+}
+
+func (f List) FormCount() int {
+	return len(f.Forms())
+}
+
+// GetForm returns the ith form of the list or panics.
+func (f List) GetForm(i int) *Form {
+	return f.Forms()[i]
+}
+
+func (f List) code(fmtCtx *formatContext) string {
+	var strs []string
+	meaningfulSubforms := f.Forms()
+	for _, subForm := range meaningfulSubforms {
+		strs = append(strs, subForm.code(fmtCtx))
+	}
+	if !fmtCtx.useVerboseQuoteForm() && len(meaningfulSubforms) == 2 && meaningfulSubforms[0].symbol.Equals(quote) {
+		return fmt.Sprintf("'%s", meaningfulSubforms[1].code(fmtCtx))
+	}
+	return fmt.Sprintf("(%s)", strings.Join(strs, " "))
+}
+
+type ListBuilder struct {
+	forms []*Form
+}
+
+func NewListBuilder(forms ...*Form) *ListBuilder {
+	return &ListBuilder{append([]*Form{}, forms...)}
+}
+
+func (b *ListBuilder) Add(forms ...*Form) *ListBuilder {
+	b.forms = append(b.forms, forms...)
+	return b
+}
+
+func (b *ListBuilder) Build() *List {
+	return NewList(b.forms...)
+}
+
+// WithBasis returns a copy of the form with the given macro expansion basis.
+func WithBasis(form, basis *Form) *Form {
+	if form == nil {
+		return nil
+	}
+	out := *form
+	if basis != nil {
+		out.start = basis.start
+		out.end = basis.end
+		out.fileSrc = basis.fileSrc
+	}
+	return &out
+}
+
+type FormBuilder struct {
+	list   *List
+	symbol *Symbol
+	str    *String
+
+	// macroExpansionBasis is the form from which the form being constructed was derived.
+	// This is used to keep track of the source code location of a macro expansion.
+	macroExpansionBasis *Form
+}
+
+func NewSymbolFormBuilder(sym *Symbol) *FormBuilder {
+	if sym == nil {
+		panic("nil symbol passed to NewSymbolFormBuilder")
+	}
+	return &FormBuilder{symbol: sym}
+}
+
+func NewListFormBuilder(list *List) *FormBuilder {
+	if list == nil {
+		panic("nil list passed to NewListFormBuilder")
+	}
+	return &FormBuilder{list: list}
+}
+
+func NewStringFormBuilder(literal string) *FormBuilder {
+	return &FormBuilder{str: &String{literal}}
+}
+
+func (b *FormBuilder) SetMacroExpansionBasis(basisForm *Form) *FormBuilder {
+	b.macroExpansionBasis = basisForm
+	return b
+}
+
+func (b *FormBuilder) Build() *Form {
+	var start, end filePosition
+	if b.macroExpansionBasis != nil {
+		start, end = b.macroExpansionBasis.start, b.macroExpansionBasis.end
+	}
+
+	oneofCount := 0
+	if b.list != nil {
+		oneofCount++
+	}
+	if b.symbol != nil {
+		oneofCount++
+	}
+	if b.str != nil {
+		oneofCount++
+	}
+	if oneofCount != 1 {
+		panic("expected exactly one of ")
+	}
+
+	return &Form{
+		list:          b.list,
+		symbol:        b.symbol,
+		stringLiteral: b.str,
+		start:         start,
+		end:           end,
+	}
+}
+
+type Whitespace struct {
+	literal string
+}
+
+func (f Whitespace) code(fmtCtx *formatContext) string {
+	return fmt.Sprintf("ws:%q", f.literal)
+}
+
+func consumeForm(cfg *config, src *FileSource) (*Form, error) {
+	r, _, err := src.ReadRune()
+	if err != nil {
+		return nil, err
+	}
+	if err := src.UnreadRune(); err != nil {
+		return nil, err
+	}
+	switch r {
+	case ' ', '\t', '\n':
+		return consumeWhitespace(src)
+	case '(':
+		return consumeList(cfg, src)
+	case ')':
+		return nil, fmt.Errorf("%s: unexpected character %q", src, r)
+	case '"':
+		return consumeString(src)
+	case '\'':
+		return consumeQuotedExpression(cfg, src)
+	default:
+		return consumeNonWhitespace(cfg, src)
+	}
+}
+
+func consumeWhitespace(src *FileSource) (*Form, error) {
+	start := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+	literal := strings.Builder{}
+loop:
+	for {
+		r, _, err := src.ReadRune()
+		if err == io.EOF {
+			break loop
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch r {
+		case ' ', '\t', '\n':
+			literal.WriteRune(r)
+		default:
+			if err := src.UnreadRune(); err != nil {
+				return nil, err
+			}
+			break loop
+		}
+	}
+	if literal.Len() == 0 {
+		return nil, fmt.Errorf("%s: failed to consume any whitespace", src)
+	}
+
+	end := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+	return &Form{
+		fileSrc: src,
+		start:   start,
+		end:     end,
+		whitespace: &Whitespace{
+			literal: literal.String(),
+		},
+	}, nil
+}
+
+func consumeNonWhitespace(cfg *config, src *FileSource) (*Form, error) {
+	start := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+	literal := strings.Builder{}
+loop:
+	for {
+		r, _, err := src.ReadRune()
+		if err == io.EOF {
+			break loop
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch r {
+		case ' ', '\t', '\n', ')', '(', '"':
+			if err := src.UnreadRune(); err != nil {
+				return nil, err
+			}
+			break loop
+		case '/':
+			if literal.Len() == 0 {
+				// could be a comment
+				commentForm, isComment, err := consumePossibleComment(src, start)
+				if err != nil {
+					return nil, err
+				}
+				if isComment {
+					return commentForm, nil
+				}
+			}
+
+			// Cold have come to the end of a symbol and start of a comment, or a /
+			// is in the middle of the symbol.
+			r2, _, err := src.ReadRune()
+			if err == io.EOF {
+				break loop
+			}
+			if err := src.UnreadRune(); err != nil {
+				return nil, err
+			}
+			startOfComment := r2 == '/' || r2 == '*'
+			if startOfComment {
+				// Start of comment... unread r as well and return.
+				if err := src.UnreadRune(); err != nil {
+					return nil, err
+				}
+				break loop
+			}
+		default:
+			literal.WriteRune(r)
+		}
+	}
+	if literal.Len() == 0 {
+		return nil, fmt.Errorf("%s: failed to consume a token", src)
+	}
+
+	end := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+	return parseToken(cfg, literal.String(), src, start, end)
+}
+
+func parseToken(cfg *config, literal string, src *FileSource, start, end filePosition) (*Form, error) {
+	if i, err := strconv.ParseInt(literal, 0, 64); err == nil {
+		return &Form{
+			fileSrc: src,
+			start:   start,
+			end:     end,
+			intForm: &Int{i},
+		}, nil
+	}
+	if f, err := strconv.ParseFloat(literal, 64); err == nil {
+		return &Form{
+			fileSrc:     src,
+			start:       start,
+			end:         end,
+			float64Form: &Float64{f},
+		}, nil
+	}
+	sym, err := cfg.parseSymbol(literal)
+	if err != nil {
+		return nil, err
+	}
+	return &Form{
+		fileSrc: src,
+		start:   start,
+		end:     end,
+		symbol:  sym,
+	}, nil
+}
+
+var multilineCommentEndRE = regexp.MustCompile(`\*/`)
+
+// Callsed after reading a '(' rune.
+func consumePossibleComment(src *FileSource, start filePosition) (*Form, bool, error) {
+	contents := strings.Builder{}
+	contents.WriteRune('/')
+	secondCommentRune, _, err := src.ReadRune()
+	if err != nil {
+		return nil, false, err
+	}
+	contents.WriteRune(secondCommentRune)
+	switch secondCommentRune {
+	case '*':
+		// Consume the contents of the multi-line comment.
+		for {
+			r, _, err := src.ReadRune()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			contents.WriteRune(r)
+			if r != '*' {
+				continue
+			}
+			r2, _, err := src.ReadRune()
+			contents.WriteRune(r2)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			if r2 == '/' {
+				break
+			}
+		}
+		end := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+		return &Form{
+			fileSrc: src,
+			start:   start,
+			end:     end,
+			comment: &Comment{contents.String()},
+		}, true, nil
+	case '/':
+		for {
+			r, _, err := src.ReadRune()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return nil, false, err
+			}
+			if r == '\n' {
+				break
+			}
+			contents.WriteRune(r)
+		}
+		end := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+		return &Form{
+			fileSrc: src,
+			start:   start,
+			end:     end,
+			comment: &Comment{contents.String()},
+		}, true, nil
+	default:
+		// Unread last character.
+		return nil, false, src.UnreadRune()
+	}
+}
+
+// consumeList assumes the first character is ( and reads all forms in the list,
+// and the closing parenthesis.
+func consumeList(cfg *config, src *FileSource) (*Form, error) {
+	start := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+
+	r, _, err := src.ReadRune()
+	if err != nil {
+		return nil, err
+	}
+	if r != '(' {
+		return nil, fmt.Errorf("%s: expected opening paren, got %q", src, r)
+	}
+
+	var forms []*Form
+loop:
+	for {
+		r, _, err := src.ReadRune()
+		if err == io.EOF {
+			return nil, fmt.Errorf("%s: did not find end of list token ')'", src)
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch r {
+		case ')':
+			break loop
+		default:
+			if err := src.UnreadRune(); err != nil {
+				return nil, err
+			}
+			f, err := consumeForm(cfg, src)
+			if err != nil {
+				return nil, err
+			}
+			forms = append(forms, f)
+		}
+	}
+
+	end := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+	return &Form{
+		fileSrc: src,
+		start:   start,
+		end:     end,
+		list:    &List{forms: forms},
+	}, nil
+}
+
+var quote = GetSymbol("quote")
+
+func consumeQuotedExpression(cfg *config, src *FileSource) (*Form, error) {
+	start := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+	r, _, err := src.ReadRune()
+	if err != nil {
+		return nil, err
+	}
+	if r != '\'' {
+		return nil, fmt.Errorf("%s: expected first character of quoted expression to be quote (')", src)
+	}
+	endQuoteSym := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+
+	forms := []*Form{
+		&Form{
+			fileSrc: src,
+			start:   start,
+			end:     endQuoteSym,
+			symbol:  quote,
+		},
+	}
+	for {
+		operand, err := consumeForm(cfg, src)
+		if err != nil {
+			return nil, err
+		}
+		forms = append(forms, operand)
+		// Skip comments and whitespace.
+		if operand.comment == nil && operand.whitespace == nil {
+			break
+		}
+	}
+	return &Form{
+		fileSrc: src,
+		start:   start,
+		end:     forms[len(forms)-1].end,
+		list:    &List{forms: forms},
+	}, nil
+}
+
+func consumeString(src *FileSource) (*Form, error) {
+	start := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+
+	r, _, err := src.ReadRune()
+	if err != nil {
+		return nil, err
+	}
+	if r != '"' {
+		return nil, fmt.Errorf("%s: expected opening \", got %q", src, r)
+	}
+
+	value := strings.Builder{}
+	value.WriteRune(r)
+	prevCharWasEscape := false
+loop:
+	for {
+		r, _, err := src.ReadRune()
+		if err == io.EOF {
+			return nil, fmt.Errorf("%s: did not find end of string token '\"'", src)
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch r {
+		case '\n':
+			value.WriteString(`\n`) // Replace newline literals with the literal `\n`, which is supported by strconv.Unquote.
+			//return nil, fmt.Errorf("%s: unexpected newline before terminating \" character", src)
+		case '"':
+			if !prevCharWasEscape {
+				value.WriteRune('"')
+				break loop
+			}
+			fallthrough
+		default:
+			value.WriteRune(r)
+		}
+		prevCharWasEscape = (r == '\\')
+	}
+	parsedValue, err := strconv.Unquote(value.String())
+	if err != nil {
+		return nil, fmt.Errorf("%s: error parsing string - %w", src, err)
+	}
+
+	end := filePosition{src.cursorByteOffset, src.cursorLineStartRuneOffset}
+	return &Form{
+		fileSrc:       src,
+		start:         start,
+		end:           end,
+		stringLiteral: &String{parsedValue},
+	}, nil
+}
