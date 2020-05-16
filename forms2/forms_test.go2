@@ -1,6 +1,6 @@
-// Package forms is a library for reading s-expressions. Lists, strings,
+// Package sexpressions is a library for reading s-expressions. Lists, strings,
 // comments, numbers, and symbols are supported.
-package forms
+package sexpressions
 
 import (
 	"fmt"
@@ -76,6 +76,10 @@ func (f *Form(ElemType)) code() string {
 		return fmt.Sprintf("!!!error printing code: %v", err)
 	}
 	return fc.s.String()
+}
+
+func (f *Form(ElemType)) format(fc *FormatContext) error {
+	return f.adapter.Format(f.elem, fc)
 }
 
 type FormatContext struct {
@@ -167,6 +171,27 @@ func BasicForm(type T PrimitiveType)(t T) *Form(T) {
 	// doesn't work: adapter := &basicFormAdapter(T){}
 	var adapter FormAdapter(T) = &basicFormAdapter(T){}
 	return newForm(t, adapter)
+}
+
+type GenericForm interface {
+	code() string
+	format(fc *FormatContext) error
+}
+
+func ListForm(f ...GenericForm) *Form([]GenericForm) {
+	formatFn := func(list []GenericForm, fc *FormatContext) error {
+		fc.Print("(")
+		for i := 0; i < len(list); i++ {
+			if i != 0 { fc.Print(" ")}
+			list[i].format(fc)
+		}
+		fc.Print(")")
+		return nil
+	}
+	// It seems a bit verbose that (string) is required here, not fnBasedFormAdapter{...}.
+	var adapter FormAdapter([]GenericForm) = &fnBasedFormAdapter([]GenericForm){formatFn}
+	//var adapter FormAdapter(string) = &fnBasedFormAdapter{formatFn}
+	return newForm(f, adapter)
 }
 
 // func (f *Form) String() string {
