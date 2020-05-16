@@ -1,0 +1,221 @@
+package errhelp
+
+import (
+	"fmt"
+	"reflect"
+	"testing"
+	"time"
+)
+
+type inputPoint struct{
+	interp float64 // [0, 1] between start and end
+	value int64
+}
+
+type inputTimeSeries struct {
+	start, end string
+	inputPoints []inputPoint
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Tests
+////////////////////////////////////////////////////////////////////////////////
+const layout = "2006-01-02T15"
+type point struct {
+    formattedTime string
+    value int64
+}
+
+type result struct {min, max point}
+
+func minMax(msg *inputTimeSeries) (result, error) { 
+    start, err := time.Parse(layout, msg.start)
+    if err != nil {
+        return result{}, fmt.Errorf("bad start: %w", err)
+    }
+    end, err := time.Parse(layout, msg.end)
+    if err != nil {
+        return result{}, fmt.Errorf("bad end: %w", err)
+	}
+	min, max := argminmax(msg.inputPoints, func(p inputPoint) float64 {
+		return float64(p.value)
+	})
+	mkPoint := func(ip inputPoint) point {
+		return point{interpTime(start, end, ip.interp).Format(layout), ip.value}
+	}
+	return result{mkPoint(*min), mkPoint(*max)}, nil
+}
+
+func minMax2(msg *inputTimeSeries) (result, error) {
+	return errMap2(
+		MakeErrPair(time.Parse(layout, msg.start)).withMessage("bad start"),
+		MakeErrPair(time.Parse(layout, msg.end)).withMessage("bad end"),
+		func(start, end time.Time) (result, error) {
+			min, max := argminmax(msg.inputPoints, func(p inputPoint) float64 {
+				return float64(p.value)
+			})
+			mkPoint := func(ip inputPoint) point {
+				return point{interpTime(start, end, ip.interp).Format(layout), ip.value}
+			}
+			return result{mkPoint(*min), mkPoint(*max)}, nil
+		}).tuple()
+}
+
+func interpTime(start, end time.Time, f float64) time.Time {
+	dur := end.Sub(start)
+	return start.Add(time.Duration(dur.Seconds() * f) * time.Second)
+}
+
+type ErrPair(type T) struct{
+	Value T
+	Error error
+}
+
+func (p ErrPair(T)) withMessage(msg string) ErrPair(T) {
+	if p.Error == nil {
+		return p
+	}
+	return ErrPair(T){p.Value, fmt.Errorf("%s: %w", msg, p.Error)}
+}
+
+func (p ErrPair(T)) tuple() (T, error) {
+	return p.Value, p.Error
+}
+
+func MakeErrPair(type T)(t T, err error) ErrPair(T) {
+	return ErrPair(T){t, err}
+}
+
+func errMap2(type A, B, R)(
+	a ErrPair(A),
+	b ErrPair(B),
+	successFn func(a A, b B) (R, error)) ErrPair(R) {
+	
+		if a.Error != nil {
+			var zero R
+			return MakeErrPair(zero, a.Error)
+		}
+		if b.Error != nil {
+			var zero R
+			return MakeErrPair(zero, b.Error)
+		}
+		return MakeErrPair(successFn(a.Value, b.Value))
+}
+
+
+func errMap1(type A, R)(
+	a ErrPair(A),
+	successFn func(A) (R, error)) ErrPair(R) {
+	if a.Error != nil {
+		var zero R
+		return MakeErrPair(zero, a.Error)
+	}
+	return MakeErrPair(successFn(a.Value))
+}
+
+
+func TestErrHandling(t *testing.T) {
+	tests := []struct {
+		input *inputTimeSeries
+		want result
+		wantErr bool
+	}{
+		{
+			&inputTimeSeries{
+				start: "blah",
+				end: "blah2",
+			},
+			result{},
+			true,
+		},
+		{
+			&inputTimeSeries{
+				start: "2020-05-01T01",
+				end: "2020-06-01T01",
+				inputPoints: []inputPoint{
+					{0, 42},
+					{1, 45},
+					{.5, 312},
+				},
+			},
+			result{
+				min: point{"2020-05-01T01", 42},
+				max: point{"2020-05-16T13", 312},
+			},
+			false,
+		},
+	}
+	for i, tt := range tests {
+		for _, impl := range []struct{
+			name string
+			fn func (msg *inputTimeSeries) (result, error)
+		} {
+			{"typical_go1", minMax},
+			{"errpair_go2", minMax2},
+		} {
+			t.Run(fmt.Sprintf("%d_%s", i, impl.name), func(t *testing.T) {
+				got, err := impl.fn(tt.input)
+				if gotErr := (err != nil); gotErr != tt.wantErr {
+					t.Errorf("got err %v, want err %v", err, tt.wantErr)
+				}
+				if !reflect.DeepEqual(got, tt.want) {
+					t.Errorf("got %v, want %v", got, tt.want)
+				}
+			})
+		}
+	}
+}
+
+type person  struct{
+	name string
+	age time.Duration
+	gumballCollectionSize int64
+}
+
+func TestArgminmax(t *testing.T) {
+	peeps := []person{
+		{"Olivia", time.Hour * 8760 * 1 , 40},
+		{"Fred", time.Hour * 8760 * 1 * 18, 32},
+		{"Amoli", time.Hour * 8760 * 1 * 2, 400000},
+	}
+	tests := []struct {
+		key func(p person) float64
+		wantMin, wantMax string
+	}{
+		{
+			func(p person) float64 { return p.age.Seconds() },
+			"Olivia", "Fred",
+		},
+	}
+	for i, tt := range tests {
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			gotMin, gotMax := argminmax(person)(peeps, tt.key)
+			if got, want := gotMin.name, tt.wantMin; got != want {
+				t.Errorf("got min %q want min %q", got, want)
+			}
+			if got, want := gotMax.name, tt.wantMax; got != want {
+				t.Errorf("got max %q want min %q", got, want)
+			}
+		})
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Implementation
+////////////////////////////////////////////////////////////////////////////////
+
+func argminmax(type E)(list []E, key func(e E) float64) (*E, *E) {
+	var min, max *float64
+	var argmin, argmax *E
+	for i := range list {
+		ptr := &list[i]
+		f := key(*ptr)
+		if min == nil || f < *min {
+			min, argmin = &f, ptr
+		}
+		if max == nil || f > *max {
+			max, argmax = &f, ptr
+		}
+	}
+	return argmin, argmax
+}

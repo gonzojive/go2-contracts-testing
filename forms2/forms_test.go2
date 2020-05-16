@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -20,36 +21,76 @@ func TestReadFile(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		f genericForm
 		want string
+		f genericForm
 	}{
 		{
-			"string-based",
-			StringForm(`fancy "string" with quotes`),
 			"\"fancy \\\"string\\\" with quotes\"",
+			StringForm(`fancy "string" with quotes`),
 		},
 		{
-			"int-based",
-			BasicForm(42),
 			"42",
+			BasicForm(42),
 		},
-		{"int-based", BasicForm(int8(42)), "int8:42"},
-		{"complex128", BasicForm(2 - 4i), "(complex128 2.000000 -4.000000)"},
-		{"complex128", BasicForm(complex64(2 - 4i)), "(complex64 2.000000 -4.000000)"},
+		{"int8:42", BasicForm(int8(42))},
+		{"(complex64 2.000000 -4.000000)", BasicForm(complex64(2 - 4i))},
+		{"(1 2)", NewListInterface(BasicForm(1), BasicForm(2))},
+		{"(1 2)", NewListInterface(BasicForm(1), BasicForm(2))},
+		{"(abc x:Y)", NewListInterface(NewSymbolForm("go-user", "abc"), NewSymbolForm("x", "Y"))},
+		{
+			"(abc x:Y)",
+			NewListInterface(
+				NewSymbolForm("go-user", "abc"),
+				NewSymbolForm("x", "Y")),
+		},
+		// Causes segfault:
+		// {
+		// 	"(abc x:Y)",
+		// 	ListFromSymbolForms(
+		// 		NewSymbolForm("go-user", "abc"),
+		// 		NewSymbolForm("x", "Y")),
+		// },
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// var gotFormStrings []string
-			// receiver := func(form *Form) Indicator {
-			//	gotFormStrings = append(gotFormStrings, form.code(tt.fmtCtx))
-			//	return Continue
-			// }
-			// if err := ReadFile(tt.src, receiver); (err != nil) != tt.wantErr {
-			//	t.Errorf("ReadFile() error = %v, wantErr %v", err, tt.wantErr)
-			// }
-			if got, want := tt.f.code(), tt.want; got != want {
+		t.Run(tt.want, func(t *testing.T) {
+			got, want := tt.f.code(), tt.want
+			if got != want {
 				t.Errorf("ReadFile() got diff in expected forms:\ngot  %v,\nwant %v", got, want)
+			}
+		})
+	}
+}
+
+type person  struct{
+	name string
+	age time.Duration
+	gumballCollectionSize int64
+}
+
+
+func TestArgminmax(t *testing.T) {
+	peeps := []person{
+		{"Olivia", time.Hour * 8760 * 1 , 40},
+		{"Fred", time.Hour * 8760 * 1 * 18, 32},
+		{"Amoli", time.Hour * 8760 * 1 * 2, 400000},
+	}
+	tests := []struct {
+		key func(p person) float64
+		wantMin, wantMax string
+	}{
+		{
+			func(p person) float64 { return p.age.Seconds() },
+			"Olivia", "Fred",
+		},
+	}
+	for i, tt := range tests {
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			gotMin, gotMax := argminmax(person)(peeps, tt.key)
+			if got, want := gotMin.name, tt.wantMin; got != want {
+				t.Errorf("got min %q want min %q", got, want)
+			}
+			if got, want := gotMax.name, tt.wantMax; got != want {
+				t.Errorf("got max %q want min %q", got, want)
 			}
 		})
 	}
@@ -58,10 +99,6 @@ func TestReadFile(t *testing.T) {
 ////////////////////////////////////////////////////////////////////////////////
 // Implementation
 ////////////////////////////////////////////////////////////////////////////////
-
-
-
-
 type Form(type ElemType) struct {
 	elem ElemType
 	adapter FormAdapter(ElemType)
@@ -178,7 +215,7 @@ type GenericForm interface {
 	format(fc *FormatContext) error
 }
 
-func ListForm(f ...GenericForm) *Form([]GenericForm) {
+func NewListInterface(f ...GenericForm) *Form([]GenericForm) {
 	formatFn := func(list []GenericForm, fc *FormatContext) error {
 		fc.Print("(")
 		for i := 0; i < len(list); i++ {
@@ -193,6 +230,145 @@ func ListForm(f ...GenericForm) *Form([]GenericForm) {
 	//var adapter FormAdapter(string) = &fnBasedFormAdapter{formatFn}
 	return newForm(f, adapter)
 }
+
+// Doesn't work
+
+// func ListFromForms(type E)(f ...*Form(E)) *Form([]*Form(E)) {
+// 	// formatFn := func(list []*Form(E), fc *FormatContext) error {
+// 	// 	fc.Print("(")
+// 	// 	for i := 0; i < len(list); i++ {
+// 	// 		if i != 0 { fc.Print(" ")}
+// 	// 		list[i].format(fc)
+// 	// 	}
+// 	// 	fc.Print(")")
+// 	// 	return nil
+// 	// }
+// 	// It seems a bit verbose that (string) is required here, not fnBasedFormAdapter{...}.
+// 	var adapter FormAdapter([]*Form(E)) = uniformListAdapter(E){}
+	
+// 	// xx := &fnBasedFormAdapter([]*Form(E)){}
+// 	// xx.format = formatFn
+// 	// adapter = xx
+// 	//var adapter FormAdapter(string) = &fnBasedFormAdapter{formatFn}
+// 	return newForm([]*Form(E))(f, adapter)
+// 	//return nil
+// }
+
+// Causes segfault
+//
+// func ListFromSymbolForms(f1, f2 *Form(*Symbol)) *Form([]*Form(*Symbol)) {
+// 	var adapter FormAdapter([]*Form(*Symbol)) = uniformListAdapter(*Symbol){}
+// 	value := []*(Form(*Symbol)){f1, f2}
+// 	return newForm([]*(Form(*Symbol)))(value, adapter)
+// }
+
+type uniformListAdapter(type E) struct{}
+
+func (ul uniformListAdapter(E)) Format(list []*Form(E), fc *FormatContext) error {
+	fc.Print("(")
+	for i := 0; i < len(list); i++ {
+		if i != 0 { fc.Print(" ")}
+		list[i].format(fc)
+	}
+	fc.Print(")")
+	return nil
+}
+
+
+// func NewListContract2(type F GenericForm)(f ...F) *Form([]F) {
+// 	formatFn := func(list []F, fc *FormatContext) error {
+// 		fc.Print("(")
+// 		for i := 0; i < len(list); i++ {
+// 			if i != 0 { fc.Print(" ")}
+// 			list[i].format(fc)
+// 		}
+// 		fc.Print(")")
+// 		return nil
+// 	}
+// 	// It seems a bit verbose that (string) is required here, not fnBasedFormAdapter{...}.
+// 	var adapter FormAdapter([]F) = &fnBasedFormAdapter([]F){formatFn}
+// 	//var adapter FormAdapter(string) = &fnBasedFormAdapter{formatFn}
+// 	return newForm(f, adapter)
+// }
+
+// Lisp-style symbols
+type symbolUniverse struct {
+	syms []Symbol
+}
+
+func (u *symbolUniverse) intern(packageName, name string) *Symbol {
+	return firstOr(Symbol)(u.syms, func(s *Symbol)bool {
+		return s.p == packageName && s.n == name
+	}, func() *Symbol {
+		return &Symbol{u, packageName, name}
+	})
+}
+
+// omg, thank you, we can finally write this.
+func firstOr(type E)(list []E, predicate func(e *E) bool, defaultProvider func() *E ) *E {
+	for i := range list {
+		ptr := &list[i]
+		if predicate(ptr) {
+			return ptr
+		}
+	}
+	return defaultProvider()
+}
+
+type Symbol struct {
+	u *symbolUniverse
+	p, n string
+}
+
+func (s *Symbol) PackageName() string {
+	return s.p
+}
+
+func (s *Symbol) Name() string {
+	return s.n
+}
+
+func (s *Symbol) Equal(other *Symbol) bool {
+	return s == other // pointer equality
+}
+
+func (s *Symbol) exported() bool {
+	n := s.Name()
+	if len(n) == 0 { return false}
+	return strings.ToUpper(n[0:1]) == n[0:1]
+}
+
+func (s *Symbol) code(fc *FormatContext) string {
+	if s.PackageName() == "" || s.PackageName() == currentPackage(fc) {
+		return s.Name()
+	}
+	if !s.exported() {
+		return fmt.Sprintf("%s::%s", s.PackageName(), s.Name())
+	}
+	return fmt.Sprintf("%s:%s", s.PackageName(), s.Name())
+}
+
+func currentPackage(fc *FormatContext) string {
+	return "go-user"
+}
+
+var defaultUniverse = &symbolUniverse{}
+
+func NewSymbolForm(packageName, name string) *Form(*Symbol) {
+	sym := defaultUniverse.intern(packageName, name)
+
+	formatFn := func(s *Symbol, fc *FormatContext) error {
+		fc.Print(s.code(fc))
+		return nil
+	}
+	// It seems a bit verbose that (string) is required here, not fnBasedFormAdapter{...}.
+	var adapter FormAdapter(*Symbol) = &fnBasedFormAdapter(*Symbol){formatFn}
+	//var adapter FormAdapter(string) = &fnBasedFormAdapter{formatFn}
+	return newForm(sym, adapter)
+}
+
+
+
 
 // func (f *Form) String() string {
 //	if f.fileSrc == nil {
@@ -237,3 +413,22 @@ func ListForm(f ...GenericForm) *Form([]GenericForm) {
 // func (fmtCtx *formatContext) useVerboseQuoteForm() bool {
 //	return fmtCtx != nil && fmtCtx.verboseQuoteForm
 // }
+
+// omg, thank you, we can finally write this.
+
+
+func argminmax(type E)(list []E, key func(e E) float64) (*E, *E) {
+	var min, max *float64
+	var argmin, argmax *E
+	for i := range list {
+		ptr := &list[i]
+		f := key(*ptr)
+		if min == nil || f < *min {
+			min, argmin = &f, ptr
+		}
+		if max == nil || f > *max {
+			max, argmax = &f, ptr
+		}
+	}
+	return argmin, argmax
+}

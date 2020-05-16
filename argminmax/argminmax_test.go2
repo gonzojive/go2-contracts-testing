@@ -1,0 +1,67 @@
+// Package sexpressions is a library for reading s-expressions. Lists, strings,
+// comments, numbers, and symbols are supported.
+package functional
+
+import (
+	"fmt"
+	"testing"
+	"time"
+)
+
+////////////////////////////////////////////////////////////////////////////////
+// Tests
+////////////////////////////////////////////////////////////////////////////////
+type person  struct{
+	name string
+	age time.Duration
+	gumballCollectionSize int64
+}
+
+
+func TestArgminmax(t *testing.T) {
+	peeps := []person{
+		{"Olivia", time.Hour * 8760 * 1 , 40},
+		{"Fred", time.Hour * 8760 * 1 * 18, 32},
+		{"Amoli", time.Hour * 8760 * 1 * 2, 400000},
+	}
+	tests := []struct {
+		key func(p person) float64
+		wantMin, wantMax string
+	}{
+		{
+			func(p person) float64 { return p.age.Seconds() },
+			"Olivia", "Fred",
+		},
+	}
+	for i, tt := range tests {
+		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
+			gotMin, gotMax := argminmax(person)(peeps, tt.key)
+			if got, want := gotMin.name, tt.wantMin; got != want {
+				t.Errorf("got min %q want min %q", got, want)
+			}
+			if got, want := gotMax.name, tt.wantMax; got != want {
+				t.Errorf("got max %q want min %q", got, want)
+			}
+		})
+	}
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Implementation
+////////////////////////////////////////////////////////////////////////////////
+
+func argminmax(type E)(list []E, key func(e E) float64) (*E, *E) {
+	var min, max *float64
+	var argmin, argmax *E
+	for i := range list {
+		ptr := &list[i]
+		f := key(*ptr)
+		if min == nil || f < *min {
+			min, argmin = &f, ptr
+		}
+		if max == nil || f > *max {
+			max, argmax = &f, ptr
+		}
+	}
+	return argmin, argmax
+}
