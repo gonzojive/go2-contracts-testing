@@ -3,6 +3,7 @@
 package sexpressions
 
 import (
+	//"contracts"
 	"fmt"
 	"reflect"
 	"strings"
@@ -27,14 +28,11 @@ func TestReadFile(t *testing.T) {
 			"\"fancy \\\"string\\\" with quotes\"",
 			StringForm(`fancy "string" with quotes`),
 		},
-		{
-			"42",
-			BasicForm(42),
-		},
-		{"int8:42", BasicForm(int8(42))},
+		{"(int 42)", BasicForm(42)},
+		{"42", UntypedForm(42)},
+		{"(int8 42)", BasicForm(int8(42))},
 		{"(complex64 2.000000 -4.000000)", BasicForm(complex64(2 - 4i))},
-		{"(1 2)", NewListInterface(BasicForm(1), BasicForm(2))},
-		{"(1 2)", NewListInterface(BasicForm(1), BasicForm(2))},
+		{"((int 1) (int 2))", NewListInterface(BasicForm(1), BasicForm(2))},
 		{"(abc x:Y)", NewListInterface(NewSymbolForm("go-user", "abc"), NewSymbolForm("x", "Y"))},
 		{
 			"(abc x:Y)",
@@ -96,11 +94,20 @@ type FormAdapter(type ElemType) interface {
 	Format(e ElemType, fc *FormatContext) error
 }
 
-type FormFormatter(type ElemType) func(e ElemType, fc *FormatContext)
-
 func newForm(type ElemType)(e ElemType, a FormAdapter(ElemType)) *Form(ElemType) {
 	return &Form(ElemType){e, a}
 }
+
+// Functions that operate on *Form(T)
+
+// Not yet supported:
+// func formLess(type T contracts.Ordered(T))(a, b *Form(T)) bool {
+// 	return a.elem < b.elem
+// }
+
+
+// Implementations of different Form(T) constructors:
+
 
 type fnBasedFormAdapter(type ElemType) struct {
 	format func(e ElemType, fc *FormatContext) error
@@ -123,12 +130,13 @@ func StringForm(s string) *Form(string) {
 
 contract PrimitiveType(T) {
 	T bool, int, int8, int16, int32, int64, string, uint, uint8, uint16, uint32, uint64, float32, float64, complex64, complex128
-	// string(T) is not a contract
+	// string(T) is not a contract. Perhaps the std contracts package will provide this?
 }
 
-func primitiveString(type T PrimitiveType(T))(t T) string  {
-	return string(t)
-}
+// Not yet supported. Maybe there is a contracts.Stringable() 
+// func primitiveString(type T PrimitiveType(T))(t T) string  {
+// 	return string(t)
+// }
 
 // basicFormAdapter implements FormAdapter() for the primitive types.
 type basicFormAdapter(type T PrimitiveType) struct{}
@@ -147,23 +155,24 @@ func (a *basicFormAdapter(T)) Format(e T, fc *FormatContext) error {
 	//	default: fc.Print(fmt.Sprintf("!!! unsupported type %v", e))
 	// }
 
-	// This can't be the only way, right?
+	// This can't be the only way, right?. As long as the optimizer is smart
+	// enough to make this efficient, it's fine with me.
 	rv := reflect.ValueOf(e)
 	switch rv.Kind() {
-	case reflect.Bool: fc.Print(fmt.Sprintf("%v", e))
-	case reflect.Int:fc.Print(fmt.Sprintf("%v", e))
-	case reflect.Int8: fc.Print(fmt.Sprintf("int8:%v", e))
-	case reflect.Int16: fc.Print(fmt.Sprintf("int16:%v", e))
-	case reflect.Int32: fc.Print(fmt.Sprintf("int32:%v", e))
-	case reflect.Int64: fc.Print(fmt.Sprintf("int64:%v", e))
-	case reflect.Uint: fc.Print(fmt.Sprintf("uint:%v", e))
-	case reflect.Uint8: fc.Print(fmt.Sprintf("uint8:%v", e))
-	case reflect.Uint16: fc.Print(fmt.Sprintf("uint16:%v", e))
-	case reflect.Uint32: fc.Print(fmt.Sprintf("uint32:%v", e))
-	case reflect.Uint64: fc.Print(fmt.Sprintf("uint64:%v", e))
-	case reflect.Uintptr: fc.Print(fmt.Sprintf("uintptr:%v", e))
-	case reflect.Float32: fc.Print(fmt.Sprintf("float32:%v", e))
-	case reflect.Float64: fc.Print(fmt.Sprintf("float64:%v", e))
+	case reflect.Bool: fc.Print(fmt.Sprintf("(bool %v)", e))
+	case reflect.Int:fc.Print(fmt.Sprintf("(int %v)", e))
+	case reflect.Int8: fc.Print(fmt.Sprintf("(int8 %v)", e))
+	case reflect.Int16: fc.Print(fmt.Sprintf("(int16 %v)", e))
+	case reflect.Int32: fc.Print(fmt.Sprintf("(int32 %v)", e))
+	case reflect.Int64: fc.Print(fmt.Sprintf("(int64 %v)", e))
+	case reflect.Uint: fc.Print(fmt.Sprintf("(uint %v)", e))
+	case reflect.Uint8: fc.Print(fmt.Sprintf("(uint8 %v)", e))
+	case reflect.Uint16: fc.Print(fmt.Sprintf("(uint16 %v)", e))
+	case reflect.Uint32: fc.Print(fmt.Sprintf("(uint32 %v)", e))
+	case reflect.Uint64: fc.Print(fmt.Sprintf("(uint64 %v)", e))
+	case reflect.Uintptr: fc.Print(fmt.Sprintf("(uintptr %v)", e))
+	case reflect.Float32: fc.Print(fmt.Sprintf("(float32 %v)", e))
+	case reflect.Float64: fc.Print(fmt.Sprintf("(float64 %v)", e))
 	case reflect.Complex64: fc.Print(fmt.Sprintf("(complex64 %f %f)", real(rv.Complex()), imag(rv.Complex())))
 	case reflect.Complex128:
 		 fc.Print(fmt.Sprintf("(complex128 %f %f)", real(rv.Complex()), imag(rv.Complex())))
@@ -178,6 +187,22 @@ func BasicForm(type T PrimitiveType)(t T) *Form(T) {
 	var adapter FormAdapter(T) = &basicFormAdapter(T){}
 	return newForm(t, adapter)
 }
+
+// untypedFormAdapter implements FormAdapter() for the untyped primitive types.
+type untypedFormAdapter(type T PrimitiveType) struct{}
+
+
+func (a *untypedFormAdapter(T)) Format(e T, fc *FormatContext) error {
+	fc.Print(fmt.Sprintf("%v", e))
+	return nil
+}
+
+func UntypedForm(type T PrimitiveType)(t T) *Form(T) {
+	var adapter FormAdapter(T) = &untypedFormAdapter(T){}
+	return newForm(t, adapter)
+}
+
+
 
 type GenericForm interface {
 	code() string
@@ -266,7 +291,7 @@ type symbolUniverse struct {
 }
 
 func (u *symbolUniverse) intern(packageName, name string) *Symbol {
-	return firstOr(Symbol)(u.syms, func(s *Symbol)bool {
+	return firstOrDefault(Symbol)(u.syms, func(s *Symbol)bool {
 		return s.p == packageName && s.n == name
 	}, func() *Symbol {
 		return &Symbol{u, packageName, name}
@@ -274,7 +299,7 @@ func (u *symbolUniverse) intern(packageName, name string) *Symbol {
 }
 
 // omg, thank you, we can finally write this.
-func firstOr(type E)(list []E, predicate func(e *E) bool, defaultProvider func() *E ) *E {
+func firstOrDefault(type E)(list []E, predicate func(e *E) bool, defaultProvider func() *E ) *E {
 	for i := range list {
 		ptr := &list[i]
 		if predicate(ptr) {
@@ -335,3 +360,61 @@ func NewSymbolForm(packageName, name string) *Form(*Symbol) {
 	//var adapter FormAdapter(string) = &fnBasedFormAdapter{formatFn}
 	return newForm(sym, adapter)
 }
+
+
+// FormReader
+
+type rowCol struct { row, col int }
+type cursorOffset int
+
+type sourceFile interface {
+	fileName() string
+	readRune() (rune, error)
+	peekRune() (rune, error)
+	cursorOffset() cursorOffset
+	rowCol(cursorOffset) rowCol
+}
+
+type strSourceFile struct {
+	name string
+	cursor cursorOffset
+	cursorOffsetToRune []rune
+}
+
+func newStrSourceFile(name, code string) *strSourceFile {
+
+}
+
+type FormReader struct {
+
+}
+
+func (fr *FormReader) consumeForm() error {
+	r, _, err := src.ReadRune()
+	if err != nil {
+		return nil, err
+	}
+	if err := src.UnreadRune(); err != nil {
+		return nil, err
+	}
+	switch r {
+	case ' ', '\t', '\n':
+		return fr.consumeWhitespace(src)
+	case '(':
+		return fr.consumeList(cfg, src)
+	case ')':
+		return nil, fmt.Errorf("%s: unexpected character %q", src, r)
+	case '"':
+		return fr.consumeString(src)
+	case '\'':
+		return fr.consumeQuotedExpression(cfg, src)
+	default:
+		return fr.consumeNonWhitespace(cfg, src)
+	}
+}
+
+type CodeSource struct {
+	name string
+	contents string
+}
+
