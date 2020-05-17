@@ -7,7 +7,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -56,41 +55,6 @@ func TestReadFile(t *testing.T) {
 			got, want := tt.f.code(), tt.want
 			if got != want {
 				t.Errorf("ReadFile() got diff in expected forms:\ngot  %v,\nwant %v", got, want)
-			}
-		})
-	}
-}
-
-type person  struct{
-	name string
-	age time.Duration
-	gumballCollectionSize int64
-}
-
-
-func TestArgminmax(t *testing.T) {
-	peeps := []person{
-		{"Olivia", time.Hour * 8760 * 1 , 40},
-		{"Fred", time.Hour * 8760 * 1 * 18, 32},
-		{"Amoli", time.Hour * 8760 * 1 * 2, 400000},
-	}
-	tests := []struct {
-		key func(p person) float64
-		wantMin, wantMax string
-	}{
-		{
-			func(p person) float64 { return p.age.Seconds() },
-			"Olivia", "Fred",
-		},
-	}
-	for i, tt := range tests {
-		t.Run(fmt.Sprintf("%d", i), func(t *testing.T) {
-			gotMin, gotMax := argminmax(person)(peeps, tt.key)
-			if got, want := gotMin.name, tt.wantMin; got != want {
-				t.Errorf("got min %q want min %q", got, want)
-			}
-			if got, want := gotMax.name, tt.wantMax; got != want {
-				t.Errorf("got max %q want min %q", got, want)
 			}
 		})
 	}
@@ -159,6 +123,11 @@ func StringForm(s string) *Form(string) {
 
 contract PrimitiveType(T) {
 	T bool, int, int8, int16, int32, int64, string, uint, uint8, uint16, uint32, uint64, float32, float64, complex64, complex128
+	// string(T) is not a contract
+}
+
+func primitiveString(type T PrimitiveType(T))(t T) string  {
+	return string(t)
 }
 
 // basicFormAdapter implements FormAdapter() for the primitive types.
@@ -365,70 +334,4 @@ func NewSymbolForm(packageName, name string) *Form(*Symbol) {
 	var adapter FormAdapter(*Symbol) = &fnBasedFormAdapter(*Symbol){formatFn}
 	//var adapter FormAdapter(string) = &fnBasedFormAdapter{formatFn}
 	return newForm(sym, adapter)
-}
-
-
-
-
-// func (f *Form) String() string {
-//	if f.fileSrc == nil {
-//		return fmt.Sprintf("%s", f.code(nil))
-//	}
-//	return fmt.Sprintf("%s(%s-%s) %s", f.fileSrc.name, f.start.lineCol(f.fileSrc), f.end.lineCol(f.fileSrc), f.code(nil))
-// }
-
-// func (f *Form) SExprString() string {
-//	return fmt.Sprintf("%s", f.code(nil))
-// }
-
-// func (f *Form) code(fmtCtx *formatContext) string {
-//	if c := f.stringLiteral; c != nil {
-//		return c.code(fmtCtx)
-//	}
-//	if c := f.list; c != nil {
-//		return c.code(fmtCtx)
-//	}
-//	if c := f.symbol; c != nil {
-//		return c.code(fmtCtx)
-//	}
-//	if c := f.whitespace; c != nil {
-//		return c.code(fmtCtx)
-//	}
-//	if c := f.comment; c != nil {
-//		return c.code(fmtCtx)
-//	}
-//	if c := f.intForm; c != nil {
-//		return c.code(fmtCtx)
-//	}
-//	if c := f.float64Form; c != nil {
-//		return c.code(fmtCtx)
-//	}
-//	panic("invalid form")
-// }
-
-// type formatContext struct {
-//	verboseQuoteForm bool
-// }
-
-// func (fmtCtx *formatContext) useVerboseQuoteForm() bool {
-//	return fmtCtx != nil && fmtCtx.verboseQuoteForm
-// }
-
-// omg, thank you, we can finally write this.
-
-
-func argminmax(type E)(list []E, key func(e E) float64) (*E, *E) {
-	var min, max *float64
-	var argmin, argmax *E
-	for i := range list {
-		ptr := &list[i]
-		f := key(*ptr)
-		if min == nil || f < *min {
-			min, argmin = &f, ptr
-		}
-		if max == nil || f > *max {
-			max, argmax = &f, ptr
-		}
-	}
-	return argmin, argmax
 }
